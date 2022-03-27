@@ -72,6 +72,7 @@ impl GpuDevice {
                 force_fallback_adapter: false,
             },
         ).await.unwrap();
+        println!("Adapter: {:#?}", adapter);
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -172,7 +173,10 @@ impl GpuDevice {
 }
 
 fn main() {
+    env_logger::init();
+
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).unwrap();
+    glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
 
     let (mut window, events) =
         glfw.create_window(300, 300,
@@ -181,7 +185,6 @@ fn main() {
             .expect("Failed to create GLFW window.");
 
     window.set_key_polling(true);
-    window.make_current();
 
     let (window_width, window_height) = window.get_framebuffer_size();
 
