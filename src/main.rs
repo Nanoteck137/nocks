@@ -1,9 +1,6 @@
 use glfw::{Action, Context, Key};
-use std::sync::atomic::{ AtomicBool, Ordering };
 
 extern crate glfw;
-
-static TEST: AtomicBool = AtomicBool::new(false);
 
 struct GpuDevice {
     surface: wgpu::Surface,
@@ -15,14 +12,12 @@ struct GpuDevice {
     height: u32,
 
     render_pipeline: wgpu::RenderPipeline,
-    test_render_pipeline: wgpu::RenderPipeline,
 }
 
 impl GpuDevice {
     async fn new(window: &glfw::Window, width: u32, height: u32)
         -> Option<Self>
     {
-        println!("Width: {} Height: {}", width, height);
         let instance = wgpu::Instance::new(wgpu::Backends::all());
         let surface = unsafe { instance.create_surface(window) };
         let adapter = instance.request_adapter(
@@ -32,7 +27,6 @@ impl GpuDevice {
                 force_fallback_adapter: false,
             },
         ).await.unwrap();
-        println!("Adapter: {:#?}", adapter);
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -50,11 +44,10 @@ impl GpuDevice {
             height,
             present_mode: wgpu::PresentMode::Fifo,
         };
-        println!("Config: {:#?}", config);
+
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(&wgpu::include_wgsl!("shader.wgsl"));
-        let test_shader = device.create_shader_module(&wgpu::include_wgsl!("test_shader.wgsl"));
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -100,44 +93,6 @@ impl GpuDevice {
             multiview: None, // 5.
         });
 
-        let test_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &test_shader,
-                entry_point: "vs_main", // 1.
-                buffers: &[], // 2.
-            },
-            fragment: Some(wgpu::FragmentState { // 3.
-                module: &test_shader,
-                entry_point: "fs_main",
-                targets: &[wgpu::ColorTargetState { // 4.
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                }],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw, // 2.
-                cull_mode: Some(wgpu::Face::Back),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            },
-            depth_stencil: None, // 1.
-            multisample: wgpu::MultisampleState {
-                count: 1, // 2.
-                mask: !0, // 3.
-                alpha_to_coverage_enabled: false, // 4.
-            },
-            multiview: None, // 5.
-        });
-
         Some(Self {
             surface,
             device,
@@ -148,7 +103,6 @@ impl GpuDevice {
             height,
 
             render_pipeline,
-            test_render_pipeline
         })
     }
 }
@@ -205,7 +159,7 @@ fn main() {
                     depth_stencil_attachment: None,
                 });
 
-            render_pass.set_pipeline(if !TEST.load(Ordering::Relaxed) { &gpu_device.render_pipeline } else { &gpu_device.test_render_pipeline}); // 2.
+            render_pass.set_pipeline(&gpu_device.render_pipeline); // 2.
             render_pass.draw(0..3, 0..1); // 3.
         }
 
@@ -220,10 +174,6 @@ fn handle_window_event(window: &mut glfw::Window, event: glfw::WindowEvent) {
             window.set_should_close(true)
         }
 
-        glfw::WindowEvent::Key(Key::Space, _, Action::Press, _) => {
-            let val = TEST.load(Ordering::Relaxed);
-            TEST.store(!val, Ordering::Relaxed);
-        }
         _ => {}
     }
 }
