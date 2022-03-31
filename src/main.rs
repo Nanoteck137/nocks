@@ -1,3 +1,7 @@
+use std::path::Path;
+use std::fs::File;
+use std::io::Read;
+
 use glfw::{Action, Context, Key};
 use wgpu::util::DeviceExt;
 
@@ -31,19 +35,10 @@ impl Vertex {
     }
 }
 
-const VERTICES: &[Vertex] = &[
-    Vertex { position: [-0.0868241, 0.49240386, 0.0], color: [0.5, 0.0, 0.5] }, // A
-    Vertex { position: [-0.49513406, 0.06958647, 0.0], color: [0.5, 0.0, 0.5] }, // B
-    Vertex { position: [-0.21918549, -0.44939706, 0.0], color: [0.5, 0.0, 0.5] }, // C
-    Vertex { position: [0.35966998, -0.3473291, 0.0], color: [0.5, 0.0, 0.5] }, // D
-    Vertex { position: [0.44147372, 0.2347359, 0.0], color: [0.5, 0.0, 0.5] }, // E
-];
-
-const INDICES: &[u16] = &[
-    0, 1, 4,
-    1, 2, 4,
-    2, 3, 4,
-];
+struct Map {
+    vertex_buffer: Vec<Vertex>,
+    index_buffer: Vec<u32>,
+}
 
 struct GpuDevice {
     surface: wgpu::Surface,
@@ -60,7 +55,7 @@ struct GpuDevice {
 }
 
 impl GpuDevice {
-    async fn new(window: &glfw::Window, width: u32, height: u32)
+    async fn new(window: &glfw::Window, width: u32, height: u32, map: &Map)
         -> Option<Self>
     {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
@@ -143,7 +138,7 @@ impl GpuDevice {
         let vertex_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Vertex Buffer"),
-                contents: bytemuck::cast_slice(VERTICES),
+                contents: bytemuck::cast_slice(&map.vertex_buffer),
                 usage: wgpu::BufferUsages::VERTEX,
             }
         );
@@ -151,7 +146,7 @@ impl GpuDevice {
         let index_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Index Buffer"),
-                contents: bytemuck::cast_slice(INDICES),
+                contents: bytemuck::cast_slice(&map.index_buffer),
                 usage: wgpu::BufferUsages::INDEX,
             }
         );
@@ -172,8 +167,74 @@ impl GpuDevice {
     }
 }
 
+fn load_map<P>(filename: P) -> Option<Map>
+    where P: AsRef<Path>
+{
+    let mut file = File::open(filename).ok()?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).ok()?;
+
+    let magic = &data[0..4];
+    println!("Magic: {:?}", std::str::from_utf8(&magic));
+
+    let version = u32::from_le_bytes(data[4..8].try_into().ok()?);
+    println!("Version: {}", version);
+
+    let vertex_data_offset = u64::from_le_bytes(data[8..16].try_into().ok()?);
+    let vertex_count = u64::from_le_bytes(data[16..24].try_into().ok()?);
+
+    // Convert the numbers to usize
+    let vertex_data_offset: usize = vertex_data_offset.try_into().ok()?;
+    let vertex_count: usize = vertex_count.try_into().ok()?;
+
+    println!("Vertex Offset: {:#x} Count: {}", vertex_data_offset, vertex_count);
+
+    let index_data_offset = u64::from_le_bytes(data[24..32].try_into().ok()?);
+    let index_count = u64::from_le_bytes(data[32..40].try_into().ok()?);
+
+    let index_data_offset: usize = index_data_offset.try_into().ok()?;
+    let index_count: usize = index_count.try_into().ok()?;
+
+    println!("Index Offset: {:#x} Count: {}", index_data_offset, index_count);
+
+    let mut vertices = Vec::new();
+
+    for vertex_index in 0..vertex_count {
+        let index = vertex_index * (std::mem::size_of::<f64>() * 2);
+        let offset = vertex_data_offset + index;
+        let data = &data[offset..offset + (std::mem::size_of::<f64>() * 2)];
+
+        let x = f64::from_bits(u64::from_le_bytes(data[0..8].try_into().ok()?));
+        let y = f64::from_bits(u64::from_le_bytes(data[8..16].try_into().ok()?));
+
+        vertices.push(Vertex {
+            position: [x as f32, y as f32, 0.0],
+            color: [1.0, 0.0, 1.0],
+        });
+    }
+
+    let mut indices = Vec::new();
+
+    for offset in 0..index_count {
+        let offset = offset * std::mem::size_of::<u32>();
+        let offset = index_data_offset + offset;
+        let data = &data[offset..offset + 4];
+
+        let index = u32::from_le_bytes(data.try_into().ok()?);
+        indices.push(index);
+    }
+
+    Some(Map {
+        vertex_buffer: vertices,
+        index_buffer: indices
+    })
+}
+
 fn main() {
     env_logger::init();
+
+    let map = load_map("/home/nanoteck137/wad_reader/map.mup")
+        .expect("Failed to load map");
 
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).unwrap();
     glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
@@ -188,7 +249,7 @@ fn main() {
 
     let (window_width, window_height) = window.get_framebuffer_size();
 
-    let gpu_device = pollster::block_on(GpuDevice::new(&window, window_width.try_into().unwrap(), window_height.try_into().unwrap())).unwrap();
+    let gpu_device = pollster::block_on(GpuDevice::new(&window, window_width.try_into().unwrap(), window_height.try_into().unwrap(), &map)).unwrap();
 
     while !window.should_close() {
         glfw.poll_events();
@@ -228,9 +289,9 @@ fn main() {
 
             render_pass.set_pipeline(&gpu_device.render_pipeline); // 2.
             render_pass.set_vertex_buffer(0, gpu_device.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(gpu_device.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.set_index_buffer(gpu_device.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
-            render_pass.draw_indexed(0..INDICES.len().try_into().unwrap(), 0, 0..1);
+            render_pass.draw_indexed(0..map.index_buffer.len().try_into().unwrap(), 0, 0..1);
             //render_pass.draw(0..VERTICES.len().try_into().unwrap(), 0..1); // 3.
         }
 
