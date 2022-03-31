@@ -142,7 +142,7 @@ impl GpuDevice {
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::POLYGON_MODE_POINT,
+                features: wgpu::Features::default(),
                 limits: wgpu::Limits::default(),
                 label: None,
             },
@@ -309,17 +309,17 @@ fn load_map<P>(filename: P) -> Option<Map>
     let mut vertices = Vec::new();
 
     for vertex_index in 0..vertex_count {
-        let index = vertex_index * (8 * 2 + 4 * 4);
+        let index = vertex_index * (4 * 6);
         let offset = vertex_data_offset + index;
-        let data = &data[offset..offset + (8 * 2 + 4 * 4)];
+        let data = &data[offset..offset + (4 * 6)];
 
-        let x = f64::from_le_bytes(data[0..8].try_into().ok()?);
-        let y = f64::from_le_bytes(data[8..16].try_into().ok()?);
+        let x = f32::from_le_bytes(data[0..4].try_into().ok()?);
+        let y = f32::from_le_bytes(data[4..8].try_into().ok()?);
 
-        let r = f32::from_le_bytes(data[16..20].try_into().ok()?);
-        let g = f32::from_le_bytes(data[20..24].try_into().ok()?);
-        let b = f32::from_le_bytes(data[24..28].try_into().ok()?);
-        let _a = f32::from_le_bytes(data[28..32].try_into().ok()?);
+        let r = f32::from_le_bytes(data[8..12].try_into().ok()?);
+        let g = f32::from_le_bytes(data[12..16].try_into().ok()?);
+        let b = f32::from_le_bytes(data[16..20].try_into().ok()?);
+        let _a = f32::from_le_bytes(data[20..24].try_into().ok()?);
 
         vertices.push(Vertex {
             position: [x as f32, y as f32, 0.0],
@@ -347,7 +347,7 @@ fn load_map<P>(filename: P) -> Option<Map>
 fn main() {
     env_logger::init();
 
-    let map = load_map("/home/nanoteck137/wad_reader/map.mup")
+    let map = load_map("/Users/patrikrosenstrom/wad_reader/map.mup")
         .expect("Failed to load map");
 
     let vert = map.vertex_buffer[0];
