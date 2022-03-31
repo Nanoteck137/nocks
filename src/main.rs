@@ -1,8 +1,10 @@
 use std::path::Path;
 use std::fs::File;
 use std::io::Read;
+use std::time::Instant;
 
 use glfw::{Action, Context, Key};
+use glam::f32::{ Mat4, Vec2 };
 use wgpu::util::DeviceExt;
 
 extern crate glfw;
@@ -12,6 +14,72 @@ extern crate glfw;
 struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct UniformBuffer {
+    projection_matrix: [f32; 4 * 4],
+    view_matrix: [f32; 4 * 4],
+}
+
+impl UniformBuffer {
+    fn new(projection_matrix: Mat4, view_matrix: Mat4) -> Self {
+        let mut result = Self {
+            projection_matrix: [0.0; 4 * 4],
+            view_matrix: [0.0; 4 * 4],
+        };
+
+        result.update(projection_matrix, view_matrix);
+
+        result
+    }
+
+    fn update(&mut self, projection_matrix: Mat4, view_matrix: Mat4) {
+        projection_matrix.write_cols_to_slice(&mut self.projection_matrix);
+        view_matrix.write_cols_to_slice(&mut self.view_matrix);
+    }
+
+    fn update_view(&mut self, view: Mat4) {
+        view.write_cols_to_slice(&mut self.view_matrix);
+    }
+}
+
+struct Camera {
+    pos: Vec2,
+}
+
+impl Camera {
+    fn new(pos: Vec2) -> Self {
+        Self {
+            pos
+        }
+    }
+
+    fn create_view_matrix(&self) -> Mat4 {
+        let pos = (self.pos, 0.0);
+        let view = Mat4::from_translation(pos.try_into().unwrap());
+
+        view.inverse()
+    }
+}
+
+struct GameState {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+impl GameState {
+    fn new() -> Self {
+        Self {
+            up: false,
+            down: false,
+            left: false,
+            right: false,
+        }
+    }
 }
 
 impl Vertex {
@@ -52,10 +120,13 @@ struct GpuDevice {
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+
+    uniform_buffer: wgpu::Buffer,
+    uniform_buffer_bind_group: wgpu::BindGroup,
 }
 
 impl GpuDevice {
-    async fn new(window: &glfw::Window, width: u32, height: u32, map: &Map)
+    async fn new(window: &glfw::Window, width: u32, height: u32, initial_uniform_buffer: UniformBuffer, map: &Map)
         -> Option<Self>
     {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
@@ -71,7 +142,7 @@ impl GpuDevice {
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::empty(),
+                features: wgpu::Features::POLYGON_MODE_LINE,
                 limits: wgpu::Limits::default(),
                 label: None,
             },
@@ -90,10 +161,45 @@ impl GpuDevice {
 
         let shader = device.create_shader_module(&wgpu::include_wgsl!("shader.wgsl"));
 
+        let uniform_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Uniform Buffer"),
+                contents: bytemuck::cast_slice(&[initial_uniform_buffer]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
+        let uniform_buffer_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }
+            ],
+            label: Some("uniform_buffer_bind_group_layout"),
+        });
+
+        let uniform_buffer_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &uniform_buffer_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                }
+            ],
+            label: Some("uniform_buffer_bind_group"),
+        });
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&uniform_buffer_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -118,9 +224,9 @@ impl GpuDevice {
                 topology: wgpu::PrimitiveTopology::TriangleList, // 1.
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw, // 2.
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None, //Some(wgpu::Face::Back),
                 // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
+                polygon_mode: wgpu::PolygonMode::Line,
                 // Requires Features::DEPTH_CLIP_CONTROL
                 unclipped_depth: false,
                 // Requires Features::CONSERVATIVE_RASTERIZATION
@@ -162,7 +268,10 @@ impl GpuDevice {
 
             render_pipeline,
             vertex_buffer,
-            index_buffer
+            index_buffer,
+
+            uniform_buffer,
+            uniform_buffer_bind_group,
         })
     }
 }
@@ -224,6 +333,8 @@ fn load_map<P>(filename: P) -> Option<Map>
         indices.push(index);
     }
 
+    println!("Indices: {:?}", indices);
+
     Some(Map {
         vertex_buffer: vertices,
         index_buffer: indices
@@ -233,14 +344,16 @@ fn load_map<P>(filename: P) -> Option<Map>
 fn main() {
     env_logger::init();
 
-    let map = load_map("/home/nanoteck137/wad_reader/map.mup")
+    let map = load_map("/Users/patrikrosenstrom/wad_reader/map.mup")
         .expect("Failed to load map");
+
+    let vert = map.vertex_buffer[0];
 
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).unwrap();
     glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
 
     let (mut window, events) =
-        glfw.create_window(300, 300,
+        glfw.create_window(1280, 720,
                            "Hello this is window",
                            glfw::WindowMode::Windowed)
             .expect("Failed to create GLFW window.");
@@ -249,16 +362,53 @@ fn main() {
 
     let (window_width, window_height) = window.get_framebuffer_size();
 
-    let gpu_device = pollster::block_on(GpuDevice::new(&window, window_width.try_into().unwrap(), window_height.try_into().unwrap(), &map)).unwrap();
+    let projection_matrix = Mat4::orthographic_lh(0.0, window_width as f32, 0.0, window_height as f32, -1.0, 1.0);
+    let view_matrix = Mat4::IDENTITY;
+
+    let mut uniform_buffer = UniformBuffer::new(projection_matrix, view_matrix);
+    let mut camera = Camera::new(Vec2::new(vert.position[0], vert.position[1]));
+    println!("Setting camera: {}, {}", camera.pos.x, camera.pos.y);
+    let mut game_state = GameState::new();
+
+    let gpu_device = pollster::block_on(GpuDevice::new(&window, window_width.try_into().unwrap(), window_height.try_into().unwrap(), uniform_buffer, &map)).unwrap();
+
+    let time = Instant::now();
+    let mut past = 0.0;
 
     while !window.should_close() {
+        let now = time.elapsed().as_secs_f32();
+        let dt = now - past;
+        // println!("Delta Time: {}", dt);
+        past = now;
+
         glfw.poll_events();
         for (_, event) in glfw::flush_messages(&events) {
-            handle_window_event(&mut window, event);
+            handle_window_event(&mut window, &mut game_state, event);
+        }
+
+        const CAMERA_SPEED: f32 = 1000.0;
+
+        if game_state.up {
+            camera.pos.y += CAMERA_SPEED * dt;
+        }
+
+        if game_state.down {
+            camera.pos.y -= CAMERA_SPEED * dt;
+        }
+
+        if game_state.right {
+            camera.pos.x += CAMERA_SPEED * dt;
+        }
+
+        if game_state.left {
+            camera.pos.x -= CAMERA_SPEED * dt;
         }
 
         let output = gpu_device.surface.get_current_texture().unwrap();
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        uniform_buffer.update_view(camera.create_view_matrix());
+        gpu_device.queue.write_buffer(&gpu_device.uniform_buffer, 0, bytemuck::cast_slice(&[uniform_buffer]));
 
         let mut encoder = gpu_device.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
@@ -290,6 +440,7 @@ fn main() {
             render_pass.set_pipeline(&gpu_device.render_pipeline); // 2.
             render_pass.set_vertex_buffer(0, gpu_device.vertex_buffer.slice(..));
             render_pass.set_index_buffer(gpu_device.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.set_bind_group(0, &gpu_device.uniform_buffer_bind_group, &[]);
 
             render_pass.draw_indexed(0..map.index_buffer.len().try_into().unwrap(), 0, 0..1);
             //render_pass.draw(0..VERTICES.len().try_into().unwrap(), 0..1); // 3.
@@ -300,10 +451,32 @@ fn main() {
     }
 }
 
-fn handle_window_event(window: &mut glfw::Window, event: glfw::WindowEvent) {
+fn handle_window_event(window: &mut glfw::Window, game_state: &mut GameState, event: glfw::WindowEvent) {
     match event {
         glfw::WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
             window.set_should_close(true)
+        }
+
+        glfw::WindowEvent::Key(key, _, Action::Press, _) => {
+            match key {
+                Key::W => game_state.up = true,
+                Key::S => game_state.down = true,
+                Key::A => game_state.left = true,
+                Key::D => game_state.right = true,
+
+                _ => {},
+            }
+        }
+
+        glfw::WindowEvent::Key(key, _, Action::Release, _) => {
+            match key {
+                Key::W => game_state.up = false,
+                Key::S => game_state.down = false,
+                Key::A => game_state.left = false,
+                Key::D => game_state.right = false,
+
+                _ => {},
+            }
         }
 
         _ => {}

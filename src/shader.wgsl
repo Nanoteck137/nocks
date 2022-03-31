@@ -1,5 +1,13 @@
 // Vertex shader
 
+struct UniformBuffer {
+    projection_matrix: mat4x4<f32>;
+    view_matrix: mat4x4<f32>;
+};
+
+[[group(0), binding(0)]]
+var<uniform> uniform_buffer: UniformBuffer;
+
 struct VertexInput {
     [[location(0)]] position: vec3<f32>;
     [[location(1)]] color: vec3<f32>;
@@ -16,7 +24,7 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
     out.color = model.color;
-    out.clip_position = vec4<f32>(model.position, 1.0);
+    out.clip_position = uniform_buffer.projection_matrix * uniform_buffer.view_matrix * vec4<f32>(model.position, 1.0);
     return out;
 }
 

@@ -250,6 +250,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.20.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3412e74893a912839a67e975aca0c88561e20e5461d2d358a5fa6d3b229fae59"
+
+[[package]]
 name = "glfw"
 version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,6 +498,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "env_logger",
+ "glam",
  "glfw",
  "log",
  "pollster",
