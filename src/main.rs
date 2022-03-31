@@ -142,7 +142,7 @@ impl GpuDevice {
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::POLYGON_MODE_LINE,
+                features: wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::POLYGON_MODE_POINT,
                 limits: wgpu::Limits::default(),
                 label: None,
             },
@@ -223,10 +223,10 @@ impl GpuDevice {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList, // 1.
                 strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw, // 2.
-                cull_mode: None, //Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Cw, // 2.
+                cull_mode: Some(wgpu::Face::Back),
                 // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Line,
+                polygon_mode: wgpu::PolygonMode::Fill,
                 // Requires Features::DEPTH_CLIP_CONTROL
                 unclipped_depth: false,
                 // Requires Features::CONSERVATIVE_RASTERIZATION
@@ -309,16 +309,21 @@ fn load_map<P>(filename: P) -> Option<Map>
     let mut vertices = Vec::new();
 
     for vertex_index in 0..vertex_count {
-        let index = vertex_index * (std::mem::size_of::<f64>() * 2);
+        let index = vertex_index * (8 * 2 + 4 * 4);
         let offset = vertex_data_offset + index;
-        let data = &data[offset..offset + (std::mem::size_of::<f64>() * 2)];
+        let data = &data[offset..offset + (8 * 2 + 4 * 4)];
 
-        let x = f64::from_bits(u64::from_le_bytes(data[0..8].try_into().ok()?));
-        let y = f64::from_bits(u64::from_le_bytes(data[8..16].try_into().ok()?));
+        let x = f64::from_le_bytes(data[0..8].try_into().ok()?);
+        let y = f64::from_le_bytes(data[8..16].try_into().ok()?);
+
+        let r = f32::from_le_bytes(data[16..20].try_into().ok()?);
+        let g = f32::from_le_bytes(data[20..24].try_into().ok()?);
+        let b = f32::from_le_bytes(data[24..28].try_into().ok()?);
+        let _a = f32::from_le_bytes(data[28..32].try_into().ok()?);
 
         vertices.push(Vertex {
             position: [x as f32, y as f32, 0.0],
-            color: [1.0, 0.0, 1.0],
+            color: [r, g, b],
         });
     }
 
@@ -333,8 +338,6 @@ fn load_map<P>(filename: P) -> Option<Map>
         indices.push(index);
     }
 
-    println!("Indices: {:?}", indices);
-
     Some(Map {
         vertex_buffer: vertices,
         index_buffer: indices
@@ -344,7 +347,7 @@ fn load_map<P>(filename: P) -> Option<Map>
 fn main() {
     env_logger::init();
 
-    let map = load_map("/Users/patrikrosenstrom/wad_reader/map.mup")
+    let map = load_map("/home/nanoteck137/wad_reader/map.mup")
         .expect("Failed to load map");
 
     let vert = map.vertex_buffer[0];
