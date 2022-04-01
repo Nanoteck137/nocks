@@ -4,7 +4,7 @@ use std::io::Read;
 use std::time::Instant;
 
 use glfw::{Action, Context, Key};
-use glam::f32::{ Mat4, Vec2 };
+use glam::f32::{ Mat4, Vec2, Vec3 };
 use wgpu::util::DeviceExt;
 
 extern crate glfw;
@@ -21,35 +21,78 @@ struct Vertex {
 struct UniformBuffer {
     projection_matrix: [f32; 4 * 4],
     view_matrix: [f32; 4 * 4],
+    model_matrix: [f32; 4 * 4],
 }
 
 impl UniformBuffer {
-    fn new(projection_matrix: Mat4, view_matrix: Mat4) -> Self {
+    fn new(projection_matrix: Mat4, view_matrix: Mat4, model_matrix: Mat4) -> Self {
         let mut result = Self {
             projection_matrix: [0.0; 4 * 4],
             view_matrix: [0.0; 4 * 4],
+            model_matrix: [0.0; 4 * 4],
         };
 
-        result.update(projection_matrix, view_matrix);
+        result.update(projection_matrix, view_matrix, model_matrix);
 
         result
     }
 
-    fn update(&mut self, projection_matrix: Mat4, view_matrix: Mat4) {
+    fn update(&mut self, projection_matrix: Mat4, view_matrix: Mat4, model_matrix: Mat4) {
         projection_matrix.write_cols_to_slice(&mut self.projection_matrix);
         view_matrix.write_cols_to_slice(&mut self.view_matrix);
+        model_matrix.write_cols_to_slice(&mut self.model_matrix);
     }
 
     fn update_view(&mut self, view: Mat4) {
         view.write_cols_to_slice(&mut self.view_matrix);
     }
+
+    fn update_model(&mut self, model: Mat4) {
+        model.write_cols_to_slice(&mut self.model_matrix);
+    }
 }
 
-struct Camera {
+struct Texture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl Texture {
+    const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+    fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32, label: &str)
+        -> Self
+    {
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        let desc = wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Self::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT |
+                    wgpu::TextureUsages::TEXTURE_BINDING,
+        };
+
+        let texture = device.create_texture(&desc);
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        Self { texture, view }
+    }
+}
+
+struct Camera2D {
     pos: Vec2,
 }
 
-impl Camera {
+impl Camera2D {
     fn new(pos: Vec2) -> Self {
         Self {
             pos
@@ -64,11 +107,42 @@ impl Camera {
     }
 }
 
+struct Camera3D {
+    pos: Vec3,
+    front: Vec3,
+    up: Vec3,
+}
+
+impl Camera3D {
+    fn new(pos: Vec3, front: Vec3) -> Self {
+        let up = Vec3::new(0.0, 1.0, 0.0);
+
+        Self {
+            pos,
+            front,
+            up
+        }
+    }
+
+    fn create_view_matrix(&self) -> Mat4 {
+        let view = Mat4::look_at_lh(self.pos, self.pos + self.front, self.up);
+
+        view
+    }
+}
+
 struct GameState {
     up: bool,
     down: bool,
     left: bool,
     right: bool,
+
+    first_mouse: bool,
+    last_mouse_x: f32,
+    last_mouse_y: f32,
+
+    yaw: f32,
+    pitch: f32,
 }
 
 impl GameState {
@@ -78,6 +152,13 @@ impl GameState {
             down: false,
             left: false,
             right: false,
+
+            first_mouse: true,
+            last_mouse_x: 0.0,
+            last_mouse_y: 0.0,
+
+            yaw: 90.0,
+            pitch: 0.0,
         }
     }
 }
@@ -117,6 +198,7 @@ struct GpuDevice {
     width: u32,
     height: u32,
 
+    depth_texture: Texture,
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -142,7 +224,7 @@ impl GpuDevice {
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::default(),
+                features: wgpu::Features::POLYGON_MODE_LINE, // wgpu::Features::default(),
                 limits: wgpu::Limits::default(),
                 label: None,
             },
@@ -196,6 +278,8 @@ impl GpuDevice {
             label: Some("uniform_buffer_bind_group"),
         });
 
+        let depth_texture = Texture::create_depth_texture(&device, width, height, "Depth Texture");
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
@@ -232,7 +316,13 @@ impl GpuDevice {
                 // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
-            depth_stencil: None, // 1.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1, // 2.
                 mask: !0, // 3.
@@ -265,6 +355,8 @@ impl GpuDevice {
 
             width,
             height,
+
+            depth_texture,
 
             render_pipeline,
             vertex_buffer,
@@ -309,20 +401,21 @@ fn load_map<P>(filename: P) -> Option<Map>
     let mut vertices = Vec::new();
 
     for vertex_index in 0..vertex_count {
-        let index = vertex_index * (4 * 6);
+        let index = vertex_index * (4 * 7);
         let offset = vertex_data_offset + index;
-        let data = &data[offset..offset + (4 * 6)];
+        let data = &data[offset..offset + (4 * 7)];
 
         let x = f32::from_le_bytes(data[0..4].try_into().ok()?);
         let y = f32::from_le_bytes(data[4..8].try_into().ok()?);
+        let z = f32::from_le_bytes(data[8..12].try_into().ok()?);
 
-        let r = f32::from_le_bytes(data[8..12].try_into().ok()?);
-        let g = f32::from_le_bytes(data[12..16].try_into().ok()?);
-        let b = f32::from_le_bytes(data[16..20].try_into().ok()?);
-        let _a = f32::from_le_bytes(data[20..24].try_into().ok()?);
+        let r = f32::from_le_bytes(data[12..16].try_into().ok()?);
+        let g = f32::from_le_bytes(data[16..20].try_into().ok()?);
+        let b = f32::from_le_bytes(data[20..24].try_into().ok()?);
+        let _a = f32::from_le_bytes(data[24..28].try_into().ok()?);
 
         vertices.push(Vertex {
-            position: [x as f32, y as f32, 0.0],
+            position: [x, y, z],
             color: [r, g, b],
         });
     }
@@ -347,8 +440,44 @@ fn load_map<P>(filename: P) -> Option<Map>
 fn main() {
     env_logger::init();
 
-    let map = load_map("/Users/patrikrosenstrom/wad_reader/map.mup")
+    let mut map = load_map("/home/nanoteck137/wad_reader/map.mup")
         .expect("Failed to load map");
+
+    /*
+    map.vertex_buffer.clear();
+    map.index_buffer.clear();
+    */
+
+    let vertices = [
+        Vec3::new(-1.0, -1.0, -1.0),
+        Vec3::new(1.0, -1.0, -1.0),
+        Vec3::new(1.0, 1.0, -1.0),
+        Vec3::new(-1.0, 1.0, -1.0),
+        Vec3::new(-1.0, -1.0, 1.0),
+        Vec3::new(1.0, -1.0, 1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(-1.0, 1.0, 1.0)
+    ];
+
+    let indices = [
+        0, 1, 3, 3, 1, 2,
+        1, 5, 2, 2, 5, 6,
+        5, 4, 6, 6, 4, 7,
+        4, 0, 7, 7, 0, 3,
+        3, 2, 7, 7, 2, 6,
+        4, 5, 0, 0, 5, 1
+    ];
+
+    for v in vertices {
+        /*
+        map.vertex_buffer.push(Vertex {
+            position: [v.x, v.y, v.z],
+            color: [0.5, 0.0, 0.5],
+        });
+        */
+    }
+
+    // map.index_buffer.extend_from_slice(&indices);
 
     let vert = map.vertex_buffer[0];
 
@@ -362,15 +491,22 @@ fn main() {
             .expect("Failed to create GLFW window.");
 
     window.set_key_polling(true);
+    window.set_cursor_pos_polling(true);
+    window.set_cursor_mode(glfw::CursorMode::Disabled);
 
     let (window_width, window_height) = window.get_framebuffer_size();
 
-    let projection_matrix = Mat4::orthographic_lh(0.0, window_width as f32, 0.0, window_height as f32, -1.0, 1.0);
+    //let projection_matrix = Mat4::orthographic_lh(0.0, window_width as f32, 0.0, window_height as f32, -1.0, 1.0);
+    let aspect_ratio = window_width as f32 / window_height as f32;
+    let projection_matrix = Mat4::perspective_lh(90.0f32.to_radians(), aspect_ratio, 0.1, 2000.0);
     let view_matrix = Mat4::IDENTITY;
+    let model_matrix = Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0));
+    // let projection_matrix = Mat4::IDENTITY;
 
-    let mut uniform_buffer = UniformBuffer::new(projection_matrix, view_matrix);
-    let mut camera = Camera::new(Vec2::new(vert.position[0], vert.position[1]));
-    println!("Setting camera: {}, {}", camera.pos.x, camera.pos.y);
+    let mut uniform_buffer = UniformBuffer::new(projection_matrix, view_matrix, model_matrix);
+    let mut camera = Camera3D::new(Vec3::new(1077.0, 460.0, -3600.0), Vec3::new(0.0, 0.0, 1.0));
+    // let mut camera = Camera2D::new(Vec2::new(vert.position[0], vert.position[1]));
+    //println!("Setting camera: {}, {}", camera.pos.x, camera.pos.y);
     let mut game_state = GameState::new();
 
     let gpu_device = pollster::block_on(GpuDevice::new(&window, window_width.try_into().unwrap(), window_height.try_into().unwrap(), uniform_buffer, &map)).unwrap();
@@ -389,23 +525,43 @@ fn main() {
             handle_window_event(&mut window, &mut game_state, event);
         }
 
-        const CAMERA_SPEED: f32 = 1000.0;
+        const CAMERA_SPEED: f32 = 100.0;
+
+        /*
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        cameraPos += cameraSpeed * cameraFront;
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+        cameraPos -= cameraSpeed * cameraFront;
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+        cameraPos -= glm::normalize(glm::cross(cameraFront, cameraUp)) * cameraSpeed;
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        cameraPos += glm::normalize(glm::cross(cameraFront, cameraUp)) * cameraSpeed;
+        */
 
         if game_state.up {
-            camera.pos.y += CAMERA_SPEED * dt;
+            camera.pos += (CAMERA_SPEED * camera.front) * dt;
         }
 
         if game_state.down {
-            camera.pos.y -= CAMERA_SPEED * dt;
+            camera.pos -= (CAMERA_SPEED * camera.front) * dt;
         }
 
         if game_state.right {
-            camera.pos.x += CAMERA_SPEED * dt;
+            camera.pos -= (camera.front.cross(camera.up).normalize() * CAMERA_SPEED) * dt
         }
 
         if game_state.left {
-            camera.pos.x -= CAMERA_SPEED * dt;
+            camera.pos += (camera.front.cross(camera.up).normalize() * CAMERA_SPEED) * dt
         }
+
+        let pitch = game_state.pitch;
+        let yaw = game_state.yaw;
+
+        let direction = Vec3::new(
+            yaw.to_radians().cos() * pitch.to_radians().cos(),
+            pitch.to_radians().sin(),
+            yaw.to_radians().sin() * pitch.to_radians().cos());
+        camera.front = direction.normalize();
 
         let output = gpu_device.surface.get_current_texture().unwrap();
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -437,7 +593,14 @@ fn main() {
                             }
                         }
                     ],
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &gpu_device.depth_texture.view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: true,
+                        }),
+                        stencil_ops: None,
+                    }),
                 });
 
             render_pass.set_pipeline(&gpu_device.render_pipeline); // 2.
@@ -480,6 +643,29 @@ fn handle_window_event(window: &mut glfw::Window, game_state: &mut GameState, ev
 
                 _ => {},
             }
+        }
+
+        glfw::WindowEvent::CursorPos(mx, my) => {
+            let mx = mx as f32;
+            let my = my as f32;
+
+            if game_state.first_mouse {
+                game_state.last_mouse_x = mx;
+                game_state.last_mouse_y = my;
+                game_state.first_mouse = false;
+            }
+
+            let mut x_offset = mx - game_state.last_mouse_x;
+            let mut y_offset = game_state.last_mouse_y - my;
+            game_state.last_mouse_x = mx;
+            game_state.last_mouse_y = my;
+
+            const SENSITIVITY: f32 = 0.1;
+            x_offset *= SENSITIVITY;
+            y_offset *= SENSITIVITY;
+
+            game_state.yaw   -= x_offset;
+            game_state.pitch += y_offset;
         }
 
         _ => {}

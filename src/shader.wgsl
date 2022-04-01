@@ -3,6 +3,7 @@
 struct UniformBuffer {
     projection_matrix: mat4x4<f32>;
     view_matrix: mat4x4<f32>;
+    model_matrix: mat4x4<f32>;
 };
 
 [[group(0), binding(0)]]
@@ -24,7 +25,7 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
     out.color = model.color;
-    out.clip_position = uniform_buffer.projection_matrix * uniform_buffer.view_matrix * vec4<f32>(model.position, 1.0);
+    out.clip_position = uniform_buffer.projection_matrix * uniform_buffer.view_matrix * uniform_buffer.model_matrix * vec4<f32>(model.position, 1.0);
     return out;
 }
 
