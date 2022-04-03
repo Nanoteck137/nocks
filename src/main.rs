@@ -57,6 +57,7 @@ struct Texture {
     view: wgpu::TextureView,
 }
 
+
 impl Texture {
     const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -85,6 +86,45 @@ impl Texture {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         Self { texture, view }
+    }
+}
+
+struct Mesh {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+impl Mesh {
+    fn from_data(gpu_device: &GpuDevice,
+                 vertex_buffer: &Vec<Vertex>,
+                 index_buffer: &Vec<u32>)
+        -> Self
+    {
+        let index_count = index_buffer.len();
+
+        let vertex_buffer = gpu_device.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex Buffer"),
+                contents: bytemuck::cast_slice(vertex_buffer),
+                usage: wgpu::BufferUsages::VERTEX,
+            }
+        );
+
+        let index_buffer = gpu_device.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: bytemuck::cast_slice(index_buffer),
+                usage: wgpu::BufferUsages::INDEX,
+            }
+        );
+
+
+        Self {
+            vertex_buffer,
+            index_buffer,
+            index_count: index_count.try_into().unwrap(),
+        }
     }
 }
 
@@ -185,8 +225,7 @@ impl Vertex {
 }
 
 struct Map {
-    vertex_buffer: Vec<Vertex>,
-    index_buffer: Vec<u32>,
+    meshes: Vec<Mesh>,
 }
 
 struct GpuDevice {
@@ -200,15 +239,15 @@ struct GpuDevice {
 
     depth_texture: Texture,
     render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
 
     uniform_buffer: wgpu::Buffer,
     uniform_buffer_bind_group: wgpu::BindGroup,
 }
 
 impl GpuDevice {
-    async fn new(window: &glfw::Window, width: u32, height: u32, initial_uniform_buffer: UniformBuffer, map: &Map)
+    async fn new(window: &glfw::Window,
+                 width: u32, height: u32,
+                 initial_uniform_buffer: UniformBuffer)
         -> Option<Self>
     {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
@@ -331,22 +370,6 @@ impl GpuDevice {
             multiview: None, // 5.
         });
 
-        let vertex_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: bytemuck::cast_slice(&map.vertex_buffer),
-                usage: wgpu::BufferUsages::VERTEX,
-            }
-        );
-
-        let index_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: bytemuck::cast_slice(&map.index_buffer),
-                usage: wgpu::BufferUsages::INDEX,
-            }
-        );
-
         Some(Self {
             surface,
             device,
@@ -359,8 +382,6 @@ impl GpuDevice {
             depth_texture,
 
             render_pipeline,
-            vertex_buffer,
-            index_buffer,
 
             uniform_buffer,
             uniform_buffer_bind_group,
@@ -368,7 +389,7 @@ impl GpuDevice {
     }
 }
 
-fn load_map<P>(filename: P) -> Option<Map>
+fn load_map<P>(filename: P, gpu_device: &GpuDevice) -> Option<Map>
     where P: AsRef<Path>
 {
     let mut file = File::open(filename).ok()?;
@@ -377,19 +398,28 @@ fn load_map<P>(filename: P) -> Option<Map>
 
     let mime_map = mime::Map::deserialize(&data).unwrap();
 
+    let mut meshes = Vec::new();
+
     let sector = &mime_map.sectors[38];
 
-    let mut vertex_buffer = Vec::new();
-    for v in &sector.vertex_buffer {
-        vertex_buffer.push(Vertex {
-            position: [v.x, v.y, v.z],
-            color: [v.color[0], v.color[1], v.color[2]],
-        });
+    for sector in &mime_map.sectors {
+        let mut vertex_buffer = Vec::new();
+        for v in &sector.vertex_buffer {
+            vertex_buffer.push(Vertex {
+                position: [v.x, v.y, v.z],
+                color: [v.color[0], v.color[1], v.color[2]],
+            });
+        }
+
+        let index_buffer = &sector.index_buffer;
+        meshes.push(Mesh::from_data(gpu_device,
+                                    &vertex_buffer,
+                                    index_buffer));
     }
 
+
     let map = Map {
-        vertex_buffer: vertex_buffer,
-        index_buffer: sector.index_buffer.clone(),
+        meshes
     };
 
     Some(map)
@@ -397,9 +427,6 @@ fn load_map<P>(filename: P) -> Option<Map>
 
 fn main() {
     env_logger::init();
-
-    let mut map = load_map("/Users/patrikrosenstrom/wad_reader/map.mup")
-        .expect("Failed to load map");
 
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).unwrap();
     glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
@@ -427,7 +454,14 @@ fn main() {
     //println!("Setting camera: {}, {}", camera.pos.x, camera.pos.y);
     let mut game_state = GameState::new();
 
-    let gpu_device = pollster::block_on(GpuDevice::new(&window, window_width.try_into().unwrap(), window_height.try_into().unwrap(), uniform_buffer, &map)).unwrap();
+    let gpu_device = pollster::block_on(GpuDevice::new(&window,
+                                                       window_width.try_into().unwrap(),
+                                                       window_height.try_into().unwrap(),
+                                                       uniform_buffer)).unwrap();
+
+    let mut map = load_map("/Users/patrikrosenstrom/wad_reader/map.mup",
+                           &gpu_device)
+        .expect("Failed to load map");
 
     let time = Instant::now();
     let mut past = 0.0;
@@ -510,11 +544,14 @@ fn main() {
                 });
 
             render_pass.set_pipeline(&gpu_device.render_pipeline);
-            render_pass.set_vertex_buffer(0, gpu_device.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(gpu_device.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.set_bind_group(0, &gpu_device.uniform_buffer_bind_group, &[]);
 
-            render_pass.draw_indexed(0..map.index_buffer.len().try_into().unwrap(), 0, 0..1);
+            for mesh in &map.meshes {
+                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+
+                render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
         }
 
         gpu_device.queue.submit(std::iter::once(encoder.finish()));
