@@ -475,6 +475,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "mime"
+version = "0.1.0"
+source = "git+https://github.com/nanoteck137/mime#38f0312845e38de4a6f637c058a5c96205b6dc72"
+
+[[package]]
 name = "naga"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -501,6 +506,7 @@ dependencies = [
  "glam",
  "glfw",
  "log",
+ "mime",
  "pollster",
  "wgpu",
 ]

@@ -375,66 +375,24 @@ fn load_map<P>(filename: P) -> Option<Map>
     let mut data = Vec::new();
     file.read_to_end(&mut data).ok()?;
 
-    let magic = &data[0..4];
-    println!("Magic: {:?}", std::str::from_utf8(&magic));
+    let mime_map = mime::Map::deserialize(&data).unwrap();
 
-    let version = u32::from_le_bytes(data[4..8].try_into().ok()?);
-    println!("Version: {}", version);
+    let sector = &mime_map.sectors[38];
 
-    let vertex_data_offset = u64::from_le_bytes(data[8..16].try_into().ok()?);
-    let vertex_count = u64::from_le_bytes(data[16..24].try_into().ok()?);
-
-    // Convert the numbers to usize
-    let vertex_data_offset: usize = vertex_data_offset.try_into().ok()?;
-    let vertex_count: usize = vertex_count.try_into().ok()?;
-
-    println!("Vertex Offset: {:#x} Count: {}", vertex_data_offset, vertex_count);
-
-    let index_data_offset = u64::from_le_bytes(data[24..32].try_into().ok()?);
-    let index_count = u64::from_le_bytes(data[32..40].try_into().ok()?);
-
-    let index_data_offset: usize = index_data_offset.try_into().ok()?;
-    let index_count: usize = index_count.try_into().ok()?;
-
-    println!("Index Offset: {:#x} Count: {}", index_data_offset, index_count);
-
-    let mut vertices = Vec::new();
-
-    for vertex_index in 0..vertex_count {
-        let index = vertex_index * (4 * 7);
-        let offset = vertex_data_offset + index;
-        let data = &data[offset..offset + (4 * 7)];
-
-        let x = f32::from_le_bytes(data[0..4].try_into().ok()?);
-        let y = f32::from_le_bytes(data[4..8].try_into().ok()?);
-        let z = f32::from_le_bytes(data[8..12].try_into().ok()?);
-
-        let r = f32::from_le_bytes(data[12..16].try_into().ok()?);
-        let g = f32::from_le_bytes(data[16..20].try_into().ok()?);
-        let b = f32::from_le_bytes(data[20..24].try_into().ok()?);
-        let _a = f32::from_le_bytes(data[24..28].try_into().ok()?);
-
-        vertices.push(Vertex {
-            position: [x, y, z],
-            color: [r, g, b],
+    let mut vertex_buffer = Vec::new();
+    for v in &sector.vertex_buffer {
+        vertex_buffer.push(Vertex {
+            position: [v.x, v.y, v.z],
+            color: [v.color[0], v.color[1], v.color[2]],
         });
     }
 
-    let mut indices = Vec::new();
+    let map = Map {
+        vertex_buffer: vertex_buffer,
+        index_buffer: sector.index_buffer.clone(),
+    };
 
-    for offset in 0..index_count {
-        let offset = offset * std::mem::size_of::<u32>();
-        let offset = index_data_offset + offset;
-        let data = &data[offset..offset + 4];
-
-        let index = u32::from_le_bytes(data.try_into().ok()?);
-        indices.push(index);
-    }
-
-    Some(Map {
-        vertex_buffer: vertices,
-        index_buffer: indices
-    })
+    Some(map)
 }
 
 fn main() {
