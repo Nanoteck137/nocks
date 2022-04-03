@@ -440,46 +440,8 @@ fn load_map<P>(filename: P) -> Option<Map>
 fn main() {
     env_logger::init();
 
-    let mut map = load_map("/home/nanoteck137/wad_reader/map.mup")
+    let mut map = load_map("/Users/patrikrosenstrom/wad_reader/map.mup")
         .expect("Failed to load map");
-
-    /*
-    map.vertex_buffer.clear();
-    map.index_buffer.clear();
-    */
-
-    let vertices = [
-        Vec3::new(-1.0, -1.0, -1.0),
-        Vec3::new(1.0, -1.0, -1.0),
-        Vec3::new(1.0, 1.0, -1.0),
-        Vec3::new(-1.0, 1.0, -1.0),
-        Vec3::new(-1.0, -1.0, 1.0),
-        Vec3::new(1.0, -1.0, 1.0),
-        Vec3::new(1.0, 1.0, 1.0),
-        Vec3::new(-1.0, 1.0, 1.0)
-    ];
-
-    let indices = [
-        0, 1, 3, 3, 1, 2,
-        1, 5, 2, 2, 5, 6,
-        5, 4, 6, 6, 4, 7,
-        4, 0, 7, 7, 0, 3,
-        3, 2, 7, 7, 2, 6,
-        4, 5, 0, 0, 5, 1
-    ];
-
-    for v in vertices {
-        /*
-        map.vertex_buffer.push(Vertex {
-            position: [v.x, v.y, v.z],
-            color: [0.5, 0.0, 0.5],
-        });
-        */
-    }
-
-    // map.index_buffer.extend_from_slice(&indices);
-
-    let vert = map.vertex_buffer[0];
 
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).unwrap();
     glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
@@ -496,12 +458,10 @@ fn main() {
 
     let (window_width, window_height) = window.get_framebuffer_size();
 
-    //let projection_matrix = Mat4::orthographic_lh(0.0, window_width as f32, 0.0, window_height as f32, -1.0, 1.0);
     let aspect_ratio = window_width as f32 / window_height as f32;
     let projection_matrix = Mat4::perspective_lh(90.0f32.to_radians(), aspect_ratio, 0.1, 2000.0);
     let view_matrix = Mat4::IDENTITY;
     let model_matrix = Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0));
-    // let projection_matrix = Mat4::IDENTITY;
 
     let mut uniform_buffer = UniformBuffer::new(projection_matrix, view_matrix, model_matrix);
     let mut camera = Camera3D::new(Vec3::new(1077.0, 460.0, -3600.0), Vec3::new(0.0, 0.0, 1.0));
@@ -517,7 +477,6 @@ fn main() {
     while !window.should_close() {
         let now = time.elapsed().as_secs_f32();
         let dt = now - past;
-        // println!("Delta Time: {}", dt);
         past = now;
 
         glfw.poll_events();
@@ -526,17 +485,6 @@ fn main() {
         }
 
         const CAMERA_SPEED: f32 = 100.0;
-
-        /*
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-        cameraPos += cameraSpeed * cameraFront;
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-        cameraPos -= cameraSpeed * cameraFront;
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-        cameraPos -= glm::normalize(glm::cross(cameraFront, cameraUp)) * cameraSpeed;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-        cameraPos += glm::normalize(glm::cross(cameraFront, cameraUp)) * cameraSpeed;
-        */
 
         if game_state.up {
             camera.pos += (CAMERA_SPEED * camera.front) * dt;
@@ -603,13 +551,12 @@ fn main() {
                     }),
                 });
 
-            render_pass.set_pipeline(&gpu_device.render_pipeline); // 2.
+            render_pass.set_pipeline(&gpu_device.render_pipeline);
             render_pass.set_vertex_buffer(0, gpu_device.vertex_buffer.slice(..));
             render_pass.set_index_buffer(gpu_device.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.set_bind_group(0, &gpu_device.uniform_buffer_bind_group, &[]);
 
             render_pass.draw_indexed(0..map.index_buffer.len().try_into().unwrap(), 0, 0..1);
-            //render_pass.draw(0..VERTICES.len().try_into().unwrap(), 0..1); // 3.
         }
 
         gpu_device.queue.submit(std::iter::once(encoder.finish()));
