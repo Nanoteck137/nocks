@@ -1,3 +1,4 @@
+use bevy_ecs::prelude::*;
 use std::path::Path;
 use std::fs::File;
 use std::io::Read;
@@ -5,6 +6,8 @@ use std::time::Instant;
 
 use glfw::{Action, Context, Key};
 use glam::f32::{ Mat4, Vec2, Vec3 };
+
+use bevy_ecs::world::EntityRef;
 
 use render::{ GpuDevice, Mesh, Vertex, UniformBuffer };
 
@@ -23,7 +26,7 @@ impl Camera2D {
         }
     }
 
-    fn create_view_matrix(&self) -> Mat4 {
+    fn create_view_matria(&self) -> Mat4 {
         let pos = (self.pos, 0.0);
         let view = Mat4::from_translation(pos.try_into().unwrap());
 
@@ -55,6 +58,7 @@ impl Camera3D {
     }
 }
 
+#[derive(Debug)]
 struct GameState {
     up: bool,
     down: bool,
@@ -128,6 +132,69 @@ fn load_map<P>(filename: P, gpu_device: &GpuDevice) -> Option<Map>
     Some(map)
 }
 
+struct DeltaTime(f32);
+
+#[derive(Component, Debug)]
+#[repr(transparent)]
+struct Position(Vec3);
+
+#[derive(Component, Debug)]
+struct CameraController {
+    front: Vec3,
+    up: Vec3,
+}
+
+fn test(mut query: Query<&mut Position>) {
+    for mut position in query.iter_mut() {
+        //position.0.x += 10.0;
+        // position.0.y += 10.0;
+    }
+}
+
+fn update_camera(mut query: Query<(&mut Position, &mut CameraController)>,
+                 game_state: Res<GameState>,
+                 dt: Res<DeltaTime>)
+{
+
+    const CAMERA_SPEED: f32 = 100.0;
+
+    for (mut position, mut camera) in query.iter_mut() {
+        if game_state.up {
+            position.0 += (CAMERA_SPEED * camera.front) * dt.0;
+        }
+
+        if game_state.down {
+            position.0 -= (CAMERA_SPEED * camera.front) * dt.0;
+        }
+
+        if game_state.right {
+            position.0 -= (camera.front.cross(camera.up).normalize() * CAMERA_SPEED) * dt.0;
+        }
+
+        if game_state.left {
+            position.0 += (camera.front.cross(camera.up).normalize() * CAMERA_SPEED) * dt.0;
+        }
+
+        let pitch = game_state.pitch;
+        let yaw = game_state.yaw;
+
+        let direction = Vec3::new(
+            yaw.to_radians().cos() * pitch.to_radians().cos(),
+            pitch.to_radians().sin(),
+            yaw.to_radians().sin() * pitch.to_radians().cos());
+        camera.front = direction.normalize();
+    }
+}
+
+fn generate_view_matrix(camera: EntityRef) -> Mat4 {
+    let pos = camera.get::<Position>()
+        .expect("Camera dosen't have Position Component");
+    let controller = camera.get::<CameraController>()
+        .expect("Camera dosen't have Camera Controller Component");
+
+    Mat4::look_at_lh(pos.0, pos.0 + controller.front, controller.up)
+}
+
 fn main() {
     env_logger::init();
 
@@ -166,6 +233,30 @@ fn main() {
                            &gpu_device)
         .expect("Failed to load map");
 
+    let mut world = World::default();
+
+    world.insert_resource(game_state);
+    world.insert_resource(DeltaTime(0.0));
+
+    let camera_id = world.spawn()
+        .insert(Position(Vec3::new(1077.0, 460.0, -3600.0)))
+        .insert(CameraController {
+            front: Vec3::new(0.0, 0.0, 1.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+        })
+        .id();
+
+    let id = world.spawn()
+        .insert(Position(Vec3::new(0.0, 0.0, 0.0)))
+        .id();
+
+    let mut schedule = Schedule::default();
+
+    let stage = SystemStage::single_threaded()
+        .with_system(test)
+        .with_system(update_camera);
+    schedule.add_stage("update", stage);
+
     let time = Instant::now();
     let mut past = 0.0;
 
@@ -174,42 +265,24 @@ fn main() {
         let dt = now - past;
         past = now;
 
+        let mut dtr = world.get_resource_mut::<DeltaTime>().unwrap();
+        dtr.0 = dt;
+
+        let mut game_state = world.get_resource_mut::<GameState>().unwrap();
         glfw.poll_events();
         for (_, event) in glfw::flush_messages(&events) {
             handle_window_event(&mut window, &mut game_state, event);
         }
 
-        const CAMERA_SPEED: f32 = 100.0;
+        schedule.run(&mut world);
 
-        if game_state.up {
-            camera.pos += (CAMERA_SPEED * camera.front) * dt;
-        }
-
-        if game_state.down {
-            camera.pos -= (CAMERA_SPEED * camera.front) * dt;
-        }
-
-        if game_state.right {
-            camera.pos -= (camera.front.cross(camera.up).normalize() * CAMERA_SPEED) * dt
-        }
-
-        if game_state.left {
-            camera.pos += (camera.front.cross(camera.up).normalize() * CAMERA_SPEED) * dt
-        }
-
-        let pitch = game_state.pitch;
-        let yaw = game_state.yaw;
-
-        let direction = Vec3::new(
-            yaw.to_radians().cos() * pitch.to_radians().cos(),
-            pitch.to_radians().sin(),
-            yaw.to_radians().sin() * pitch.to_radians().cos());
-        camera.front = direction.normalize();
+        let camera = world.entity(camera_id);
+        let view_matrix = generate_view_matrix(camera);
 
         let output = gpu_device.surface.get_current_texture().unwrap();
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        uniform_buffer.update_view(camera.create_view_matrix());
+        uniform_buffer.update_view(view_matrix);
         gpu_device.queue.write_buffer(&gpu_device.uniform_buffer, 0, bytemuck::cast_slice(&[uniform_buffer]));
 
         let mut encoder = gpu_device.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -262,7 +335,10 @@ fn main() {
     }
 }
 
-fn handle_window_event(window: &mut glfw::Window, game_state: &mut GameState, event: glfw::WindowEvent) {
+fn handle_window_event(window: &mut glfw::Window,
+                       game_state: &mut GameState,
+                       event: glfw::WindowEvent)
+{
     match event {
         glfw::WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
             window.set_should_close(true)

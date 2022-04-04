@@ -13,4 +13,5 @@ log = "0.4.16"
 pollster = "0.2.5"
 bytemuck = { version = "1.8.0", features = [ "derive" ] }
 glam = "0.20.3"
+bevy_ecs = "0.6.1"
 mime = { git = "https://github.com/nanoteck137/mime" }
