@@ -60,6 +60,9 @@ impl Camera3D {
 
 #[derive(Debug)]
 struct GameState {
+    /// Set to true if the game should close
+    close: bool,
+
     up: bool,
     down: bool,
     left: bool,
@@ -76,6 +79,8 @@ struct GameState {
 impl GameState {
     fn new() -> Self {
         Self {
+            close: false,
+
             up: false,
             down: false,
             left: false,
@@ -222,20 +227,18 @@ fn main() {
     let mut camera = Camera3D::new(Vec3::new(1077.0, 460.0, -3600.0), Vec3::new(0.0, 0.0, 1.0));
     // let mut camera = Camera2D::new(Vec2::new(vert.position[0], vert.position[1]));
     //println!("Setting camera: {}, {}", camera.pos.x, camera.pos.y);
-    let mut game_state = GameState::new();
-
     let gpu_device = pollster::block_on(GpuDevice::new(&window,
                                                        window_width.try_into().unwrap(),
                                                        window_height.try_into().unwrap(),
                                                        uniform_buffer)).unwrap();
 
-    let mut map = load_map("/Users/patrikrosenstrom/doom1.mup",
+    let mut map = load_map("/home/nanoteck137/doom1.mup",
                            &gpu_device)
         .expect("Failed to load map");
 
     let mut world = World::default();
 
-    world.insert_resource(game_state);
+    world.insert_resource(GameState::new());
     world.insert_resource(DeltaTime(0.0));
 
     let camera_id = world.spawn()
@@ -260,18 +263,30 @@ fn main() {
     let time = Instant::now();
     let mut past = 0.0;
 
-    while !window.should_close() {
+    let mut close_game = false;
+    while !close_game {
         let now = time.elapsed().as_secs_f32();
         let dt = now - past;
         past = now;
 
-        let mut dtr = world.get_resource_mut::<DeltaTime>().unwrap();
-        dtr.0 = dt;
+        {
+            let mut dtr = world.get_resource_mut::<DeltaTime>().unwrap();
+            dtr.0 = dt;
+        }
 
-        let mut game_state = world.get_resource_mut::<GameState>().unwrap();
-        glfw.poll_events();
-        for (_, event) in glfw::flush_messages(&events) {
-            handle_window_event(&mut window, &mut game_state, event);
+        {
+            let mut game_state = world.get_resource_mut::<GameState>().unwrap();
+            glfw.poll_events();
+            for (_, event) in glfw::flush_messages(&events) {
+                handle_window_event(&mut game_state, event);
+            }
+        }
+
+        {
+            let mut game_state = world.get_resource_mut::<GameState>().unwrap();
+            if game_state.close {
+                close_game = true;
+            }
         }
 
         schedule.run(&mut world);
@@ -288,6 +303,11 @@ fn main() {
         let mut encoder = gpu_device.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
+
+        // window.get_render_target();
+
+        // renderer.begin_render(&render_target);
+        // renderer.end_render();
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -332,16 +352,20 @@ fn main() {
 
         gpu_device.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        if window.should_close() {
+            let mut game_state = world.get_resource_mut::<GameState>().unwrap();
+            game_state.close = true;
+        }
     }
 }
 
-fn handle_window_event(window: &mut glfw::Window,
-                       game_state: &mut GameState,
+fn handle_window_event(game_state: &mut GameState,
                        event: glfw::WindowEvent)
 {
     match event {
         glfw::WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
-            window.set_should_close(true)
+            game_state.close = true;
         }
 
         glfw::WindowEvent::Key(key, _, Action::Press, _) => {
