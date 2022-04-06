@@ -6,57 +6,15 @@ use std::time::Instant;
 
 use glfw::{Action, Context, Key};
 use glam::f32::{ Mat4, Vec2, Vec3 };
+use wgpu::util::DeviceExt;
 
 use bevy_ecs::world::EntityRef;
 
-use render::{ GpuDevice, Mesh, Vertex, UniformBuffer };
+use render::{ GpuDevice, Mesh, Vertex, UniformBuffer, Texture };
 
 extern crate glfw;
 
 mod render;
-
-struct Camera2D {
-    pos: Vec2,
-}
-
-impl Camera2D {
-    fn new(pos: Vec2) -> Self {
-        Self {
-            pos
-        }
-    }
-
-    fn create_view_matria(&self) -> Mat4 {
-        let pos = (self.pos, 0.0);
-        let view = Mat4::from_translation(pos.try_into().unwrap());
-
-        view.inverse()
-    }
-}
-
-struct Camera3D {
-    pos: Vec3,
-    front: Vec3,
-    up: Vec3,
-}
-
-impl Camera3D {
-    fn new(pos: Vec3, front: Vec3) -> Self {
-        let up = Vec3::new(0.0, 1.0, 0.0);
-
-        Self {
-            pos,
-            front,
-            up
-        }
-    }
-
-    fn create_view_matrix(&self) -> Mat4 {
-        let view = Mat4::look_at_lh(self.pos, self.pos + self.front, self.up);
-
-        view
-    }
-}
 
 #[derive(Debug)]
 struct GameState {
@@ -128,7 +86,6 @@ fn load_map<P>(filename: P, gpu_device: &GpuDevice) -> Option<Map>
                                     &vertex_buffer,
                                     index_buffer));
     }
-
 
     let map = Map {
         meshes
@@ -227,14 +184,61 @@ fn main() {
     let mut camera = Camera3D::new(Vec3::new(1077.0, 460.0, -3600.0), Vec3::new(0.0, 0.0, 1.0));
     // let mut camera = Camera2D::new(Vec2::new(vert.position[0], vert.position[1]));
     //println!("Setting camera: {}, {}", camera.pos.x, camera.pos.y);
-    let gpu_device = pollster::block_on(GpuDevice::new(&window,
-                                                       window_width.try_into().unwrap(),
-                                                       window_height.try_into().unwrap(),
-                                                       uniform_buffer)).unwrap();
 
-    let mut map = load_map("/home/nanoteck137/doom1.mup",
-                           &gpu_device)
+    let (gpu_device, surface) = pollster::block_on(GpuDevice::new_for_window(&window)).unwrap();
+
+    let map = load_map("/home/nanoteck137/doom1.mup", &gpu_device)
         .expect("Failed to load map");
+
+    let shader = gpu_device.device.create_shader_module(&wgpu::include_wgsl!("shader.wgsl"));
+
+    let uniform_buffer_handle = gpu_device.device.create_buffer_init(
+        &wgpu::util::BufferInitDescriptor {
+            label: Some("Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[uniform_buffer]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        }
+    );
+
+    let uniform_buffer_bind_group_layout = gpu_device.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+        ],
+        label: Some("uniform_buffer_bind_group_layout"),
+    });
+
+    let uniform_buffer_bind_group = gpu_device.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &uniform_buffer_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer_handle.as_entire_binding(),
+            }
+        ],
+        label: Some("uniform_buffer_bind_group"),
+    });
+
+    let pipeline_layout = render::PipelineLayout::builder()
+        .bind_group_layout(&uniform_buffer_bind_group_layout)
+        .build(&gpu_device);
+
+    let pipeline = render::RenderPipeline::builder()
+        .fragment_shader(&shader)
+        .vertex_shader(&shader)
+        .depth_stencil(true)
+        .cull_mode(wgpu::Face::Back)
+        .build(&gpu_device, &surface, &pipeline_layout);
+
+    let depth_texture = Texture::create_depth_texture(&gpu_device, surface.config().width, surface.config().height);
 
     let mut world = World::default();
 
@@ -283,7 +287,7 @@ fn main() {
         }
 
         {
-            let mut game_state = world.get_resource_mut::<GameState>().unwrap();
+            let game_state = world.get_resource_mut::<GameState>().unwrap();
             if game_state.close {
                 close_game = true;
             }
@@ -294,11 +298,14 @@ fn main() {
         let camera = world.entity(camera_id);
         let view_matrix = generate_view_matrix(camera);
 
-        let output = gpu_device.surface.get_current_texture().unwrap();
+        // TODO(patrik): Check error
+        let output = surface.get_render_target().unwrap();
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         uniform_buffer.update_view(view_matrix);
-        gpu_device.queue.write_buffer(&gpu_device.uniform_buffer, 0, bytemuck::cast_slice(&[uniform_buffer]));
+        gpu_device.queue.write_buffer(&uniform_buffer_handle,
+                                      0,
+                                      bytemuck::cast_slice(&[uniform_buffer]));
 
         let mut encoder = gpu_device.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
@@ -330,7 +337,7 @@ fn main() {
                         }
                     ],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &gpu_device.depth_texture.view,
+                        view: &depth_texture.view,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
                             store: true,
@@ -339,8 +346,8 @@ fn main() {
                     }),
                 });
 
-            render_pass.set_pipeline(&gpu_device.render_pipeline);
-            render_pass.set_bind_group(0, &gpu_device.uniform_buffer_bind_group, &[]);
+            render_pass.set_pipeline(&pipeline.handle());
+            render_pass.set_bind_group(0, &uniform_buffer_bind_group, &[]);
 
             for mesh in &map.meshes {
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));

@@ -2,164 +2,121 @@ use wgpu::util::DeviceExt;
 
 use glam::f32::Mat4;
 
-pub struct GpuDevice {
-    pub surface: wgpu::Surface,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub config: wgpu::SurfaceConfiguration,
+pub use pipeline::{ PipelineLayout, RenderPipeline, RenderPipelineBuilder };
 
-    width: u32,
-    height: u32,
+pub mod pipeline;
 
-    pub depth_texture: Texture,
-    pub render_pipeline: wgpu::RenderPipeline,
-
-    pub uniform_buffer: wgpu::Buffer,
-    pub uniform_buffer_bind_group: wgpu::BindGroup,
+pub struct WindowSurface {
+    surface: wgpu::Surface,
+    config: Option<wgpu::SurfaceConfiguration>,
 }
 
-impl GpuDevice {
-    pub async fn new(window: &glfw::Window,
-                 width: u32, height: u32,
-                 initial_uniform_buffer: UniformBuffer)
-        -> Option<Self>
+impl WindowSurface {
+    fn new(surface: wgpu::Surface) -> Self {
+        Self {
+            surface,
+            config: None,
+        }
+    }
+
+    fn configure(&mut self,
+                 device: &wgpu::Device,
+                 adapter: &wgpu::Adapter,
+                 width: u32, height: u32)
     {
-        let instance = wgpu::Instance::new(wgpu::Backends::all());
-        let surface = unsafe { instance.create_surface(window) };
-
-        let adapter = instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            },
-        ).await.unwrap();
-
-        let (device, queue) = adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                features: wgpu::Features::default(),
-                limits: wgpu::Limits::default(),
-                label: None,
-            },
-            None,
-        ).await.unwrap();
+        let surface_format =
+            self.surface.get_preferred_format(&adapter).unwrap();
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface.get_preferred_format(&adapter).unwrap(),
+            format: surface_format,
             width,
             height,
             present_mode: wgpu::PresentMode::Fifo,
         };
 
-        surface.configure(&device, &config);
+        self.surface.configure(&device, &config);
+        self.config = Some(config);
+    }
 
+    pub fn get_render_target(&self)
+        -> Result<wgpu::SurfaceTexture, wgpu::SurfaceError>
+    {
+        self.surface.get_current_texture()
+    }
+
+    pub fn config(&self) -> &wgpu::SurfaceConfiguration {
+        self.config.as_ref().expect("Surface not configured")
+    }
+}
+
+pub struct GpuDevice {
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+
+    /*
+    pub depth_texture: Texture,
+    pub render_pipeline: wgpu::RenderPipeline,
+
+    pub uniform_buffer: wgpu::Buffer,
+    pub uniform_buffer_bind_group: wgpu::BindGroup,
+    */
+}
+
+impl GpuDevice {
+    pub async fn new_for_window(window: &glfw::Window)
+        -> Option<(Self, WindowSurface)>
+    {
+        let instance = wgpu::Instance::new(wgpu::Backends::all());
+
+        let surface = unsafe { instance.create_surface(window) };
+        let mut surface = WindowSurface::new(surface);
+
+        let adapter = instance.request_adapter(
+            &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            },
+        ).await.unwrap();
+
+        let desc = wgpu::DeviceDescriptor {
+            features: wgpu::Features::default(),
+            limits: wgpu::Limits::default(),
+            label: None,
+        };
+
+        let (device, queue) = adapter.request_device(&desc, None,)
+            .await
+            .expect("Failed to request device");
+
+
+        let (width, height) = window.get_framebuffer_size();
+        surface.configure(&device, &adapter,
+                          width.try_into().ok()?,
+                          height.try_into().ok()?);
+
+        /*
         let shader = device.create_shader_module(&wgpu::include_wgsl!("../shader.wgsl"));
 
-        let uniform_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Uniform Buffer"),
-                contents: bytemuck::cast_slice(&[initial_uniform_buffer]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            }
-        );
 
-        let uniform_buffer_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }
-            ],
-            label: Some("uniform_buffer_bind_group_layout"),
-        });
-
-        let uniform_buffer_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &uniform_buffer_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                }
-            ],
-            label: Some("uniform_buffer_bind_group"),
-        });
-
+        let width = surface.config().width;
+        let height = surface.config().height;
         let depth_texture = Texture::create_depth_texture(&device, width, height, "Depth Texture");
 
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&uniform_buffer_bind_group_layout],
-                push_constant_ranges: &[],
-            });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main", // 1.
-                buffers: &[Vertex::desc()], // 2.
-            },
-            fragment: Some(wgpu::FragmentState { // 3.
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[wgpu::ColorTargetState { // 4.
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                }],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw, // 2.
-                cull_mode: Some(wgpu::Face::Back),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Texture::DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1, // 2.
-                mask: !0, // 3.
-                alpha_to_coverage_enabled: false, // 4.
-            },
-            multiview: None, // 5.
-        });
+    */
 
-        Some(Self {
-            surface,
+        let gpu_device = Self {
+            instance,
+            adapter,
             device,
             queue,
-            config,
+        };
 
-            width,
-            height,
-
-            depth_texture,
-
-            render_pipeline,
-
-            uniform_buffer,
-            uniform_buffer_bind_group,
-        })
+        Some((gpu_device, surface))
     }
 }
 
@@ -171,7 +128,7 @@ pub struct Texture {
 impl Texture {
     const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-    fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32, label: &str)
+    pub fn create_depth_texture(gpu_device: &GpuDevice, width: u32, height: u32)
         -> Self
     {
         let size = wgpu::Extent3d {
@@ -181,7 +138,7 @@ impl Texture {
         };
 
         let desc = wgpu::TextureDescriptor {
-            label: Some(label),
+            label: None,
             size,
             mip_level_count: 1,
             sample_count: 1,
@@ -191,7 +148,7 @@ impl Texture {
                     wgpu::TextureUsages::TEXTURE_BINDING,
         };
 
-        let texture = device.create_texture(&desc);
+        let texture = gpu_device.device.create_texture(&desc);
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -207,8 +164,8 @@ pub struct Mesh {
 
 impl Mesh {
     pub fn from_data(gpu_device: &GpuDevice,
-                 vertex_buffer: &Vec<Vertex>,
-                 index_buffer: &Vec<u32>)
+                     vertex_buffer: &Vec<Vertex>,
+                     index_buffer: &Vec<u32>)
         -> Self
     {
         let index_count = index_buffer.len();
