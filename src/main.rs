@@ -191,7 +191,7 @@ fn update_camera(mut query: Query<(&mut Position, &mut Camera, &Player)>,
         if game_state.up {
             let dir = camera.direction;
             let force = dir * 20.0;
-            let force = vector![force.x, force.y, force.z];
+            let force = vector![force.x, 0.0, force.z];
 
             body.set_linvel(force, true);
         }
@@ -501,6 +501,13 @@ fn main() {
                 render_pass.set_pipeline(&pipeline.handle());
 
                 let m = &sector.floor_mesh;
+                render_pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(m.index_buffer.slice(..),
+                                             wgpu::IndexFormat::Uint32);
+
+                render_pass.draw_indexed(0..m.index_count, 0, 0..1);
+
+                let m = &sector.ceiling_mesh;
                 render_pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
                 render_pass.set_index_buffer(m.index_buffer.slice(..),
                                              wgpu::IndexFormat::Uint32);
