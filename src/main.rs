@@ -1,4 +1,8 @@
 use bevy_ecs::prelude::*;
+use rapier3d::prelude::*;
+
+use rapier3d::na::*;
+
 use std::path::Path;
 use std::fs::File;
 use std::io::Read;
@@ -14,6 +18,8 @@ use render::{ GpuDevice, Mesh, Vertex, UniformBuffer, Texture };
 
 extern crate glfw;
 
+const UNIT_TO_METERS: f32 = 4.0;
+
 mod render;
 
 #[derive(Debug)]
@@ -25,6 +31,7 @@ struct GameState {
     down: bool,
     left: bool,
     right: bool,
+    jump: bool,
 
     first_mouse: bool,
     last_mouse_x: f32,
@@ -43,6 +50,7 @@ impl GameState {
             down: false,
             left: false,
             right: false,
+            jump: false,
 
             first_mouse: true,
             last_mouse_x: 0.0,
@@ -54,8 +62,17 @@ impl GameState {
     }
 }
 
+struct Sector {
+    floor_mesh: Mesh,
+    ceiling_mesh: Mesh,
+    wall_mesh: Mesh,
+
+    floor_collider: Option<Collider>,
+    wall_collider: Option<Collider>,
+}
+
 struct Map {
-    meshes: Vec<Mesh>,
+    sectors: Vec<Sector>,
 }
 
 fn load_map<P>(filename: P, gpu_device: &GpuDevice) -> Option<Map>
@@ -67,32 +84,72 @@ fn load_map<P>(filename: P, gpu_device: &GpuDevice) -> Option<Map>
 
     let mime_map = mime::Map::deserialize(&data).unwrap();
 
-    let mut meshes = Vec::new();
+    let mut sectors = Vec::new();
 
-    let sector = &mime_map.sectors[38];
-
+    let mut index = 0;
     for sector in &mime_map.sectors {
-        let mut vertex_buffer = Vec::new();
+        let generate_mesh = |m: &mime::Mesh| {
+            let mut vertex_buffer = Vec::new();
 
-        for v in &sector.vertex_buffer {
-            vertex_buffer.push(Vertex {
-                position: [v.x, v.y, v.z],
-                color: [v.color[0], v.color[1], v.color[2]],
-            });
-        }
+            for v in &m.vertex_buffer {
+                vertex_buffer.push(Vertex {
+                    position: [v.x, v.y, v.z],
+                    color: [v.color[0], v.color[1], v.color[2]],
+                });
+            }
 
-        let index_buffer = &sector.index_buffer;
-        meshes.push(Mesh::from_data(gpu_device,
-                                    &vertex_buffer,
-                                    index_buffer));
+            let index_buffer = &m.index_buffer;
+
+            Mesh::from_data(gpu_device, &vertex_buffer, index_buffer)
+        };
+
+        let generate_collider = |m: &mime::Mesh| {
+            let mut points = Vec::new();
+            let mut indices = Vec::new();
+
+            for v in &m.vertex_buffer {
+                points.push(Point3::new(v.x / UNIT_TO_METERS,
+                                        v.y / UNIT_TO_METERS,
+                                        v.z / UNIT_TO_METERS));
+            }
+
+            for i in 0..m.index_buffer.len() / 3 {
+                let p1 = m.index_buffer[i * 3 + 0];
+                let p2 = m.index_buffer[i * 3 + 1];
+                let p3 = m.index_buffer[i * 3 + 2];
+
+                indices.push([p1, p2, p3]);
+            }
+
+            ColliderBuilder::trimesh(points, indices).build()
+        };
+
+        let floor_collider = generate_collider(&sector.floor_mesh);
+        let wall_collider = generate_collider(&sector.wall_mesh);
+
+        let floor_mesh = generate_mesh(&sector.floor_mesh);
+        let ceiling_mesh = generate_mesh(&sector.ceiling_mesh);
+        let wall_mesh = generate_mesh(&sector.wall_mesh);
+
+        sectors.push(Sector {
+            floor_mesh,
+            ceiling_mesh,
+            wall_mesh,
+
+            floor_collider: Some(floor_collider),
+            wall_collider: Some(wall_collider),
+        });
+
+        index += 1;
     }
 
     let map = Map {
-        meshes
+        sectors,
     };
 
     Some(map)
 }
+
 
 struct DeltaTime(f32);
 
@@ -101,41 +158,25 @@ struct DeltaTime(f32);
 struct Position(Vec3);
 
 #[derive(Component, Debug)]
-struct CameraController {
-    front: Vec3,
+struct Camera {
+    direction: Vec3,
     up: Vec3,
 }
 
-fn test(mut query: Query<&mut Position>) {
-    for mut position in query.iter_mut() {
-        //position.0.x += 10.0;
-        // position.0.y += 10.0;
-    }
+#[derive(Component)]
+struct Player {
+    collider_handle: ColliderHandle,
+    body_handle: RigidBodyHandle,
+    speed: f32,
 }
 
-fn update_camera(mut query: Query<(&mut Position, &mut CameraController)>,
+fn update_camera(mut query: Query<(&mut Position, &mut Camera, &Player)>,
                  game_state: Res<GameState>,
+                 mut bodies: ResMut<RigidBodySet>,
                  dt: Res<DeltaTime>)
 {
-
-    const CAMERA_SPEED: f32 = 100.0;
-
-    for (mut position, mut camera) in query.iter_mut() {
-        if game_state.up {
-            position.0 += (CAMERA_SPEED * camera.front) * dt.0;
-        }
-
-        if game_state.down {
-            position.0 -= (CAMERA_SPEED * camera.front) * dt.0;
-        }
-
-        if game_state.right {
-            position.0 -= (camera.front.cross(camera.up).normalize() * CAMERA_SPEED) * dt.0;
-        }
-
-        if game_state.left {
-            position.0 += (camera.front.cross(camera.up).normalize() * CAMERA_SPEED) * dt.0;
-        }
+    for (mut position, mut camera, player) in query.iter_mut() {
+        let mut body = bodies.get_mut(player.body_handle).unwrap();
 
         let pitch = game_state.pitch;
         let yaw = game_state.yaw;
@@ -144,17 +185,69 @@ fn update_camera(mut query: Query<(&mut Position, &mut CameraController)>,
             yaw.to_radians().cos() * pitch.to_radians().cos(),
             pitch.to_radians().sin(),
             yaw.to_radians().sin() * pitch.to_radians().cos());
-        camera.front = direction.normalize();
+
+        camera.direction = direction.normalize();
+
+        if game_state.up {
+            let dir = camera.direction;
+            let force = dir * 20.0;
+            let force = vector![force.x, force.y, force.z];
+
+            body.set_linvel(force, true);
+        }
+
+        if game_state.jump {
+            let dir = Vec3::new(0.0, 1.0, 0.0);
+            let force = dir * 20.0;
+            let force = vector![force.x, force.y, force.z];
+
+            body.set_linvel(force, true);
+        }
+        /*
+        let speed = player.speed;
+
+        if game_state.up {
+            position.0 += (speed * camera.direction) * dt.0;
+        }
+
+        if game_state.down {
+            position.0 -= (speed * camera.direction) * dt.0;
+        }
+
+        if game_state.right {
+            position.0 -= (camera.direction.cross(camera.up).normalize() * speed) * dt.0;
+        }
+
+        if game_state.left {
+            position.0 += (camera.direction.cross(camera.up).normalize() * speed) * dt.0;
+        }
+        */
+    }
+}
+
+fn update_player_physics(mut query: Query<(&mut Position, &Player)>,
+                         bodies: Res<RigidBodySet>)
+{
+    for (mut position, player) in query.iter_mut() {
+        let body = bodies.get(player.body_handle).unwrap();
+        let x = body.translation().x;
+        let y = body.translation().y;
+        let z = body.translation().z;
+        let new_pos = Vec3::new(x, y, z);
+
+        position.0 = new_pos * UNIT_TO_METERS;
     }
 }
 
 fn generate_view_matrix(camera: EntityRef) -> Mat4 {
     let pos = camera.get::<Position>()
         .expect("Camera dosen't have Position Component");
-    let controller = camera.get::<CameraController>()
+    let controller = camera.get::<Camera>()
         .expect("Camera dosen't have Camera Controller Component");
 
-    Mat4::look_at_lh(pos.0, pos.0 + controller.front, controller.up)
+    let pos = pos.0 + Vec3::new(0.0, 20.0, 0.0);
+
+    Mat4::look_at_lh(pos, pos+ controller.direction, controller.up)
 }
 
 fn main() {
@@ -181,13 +274,10 @@ fn main() {
     let model_matrix = Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0));
 
     let mut uniform_buffer = UniformBuffer::new(projection_matrix, view_matrix, model_matrix);
-    let mut camera = Camera3D::new(Vec3::new(1077.0, 460.0, -3600.0), Vec3::new(0.0, 0.0, 1.0));
-    // let mut camera = Camera2D::new(Vec2::new(vert.position[0], vert.position[1]));
-    //println!("Setting camera: {}, {}", camera.pos.x, camera.pos.y);
 
     let (gpu_device, surface) = pollster::block_on(GpuDevice::new_for_window(&window)).unwrap();
 
-    let map = load_map("/home/nanoteck137/doom1.mup", &gpu_device)
+    let mut map = load_map("/home/nanoteck137/doom1.mup", &gpu_device)
         .expect("Failed to load map");
 
     let shader = gpu_device.device.create_shader_module(&wgpu::include_wgsl!("shader.wgsl"));
@@ -238,31 +328,67 @@ fn main() {
         .cull_mode(wgpu::Face::Back)
         .build(&gpu_device, &surface, &pipeline_layout);
 
+
     let depth_texture = Texture::create_depth_texture(&gpu_device, surface.config().width, surface.config().height);
+
+    let mut rigid_body_set = RigidBodySet::new();
+    let mut collider_set = ColliderSet::new();
+
+    //let sector = &mut map.sectors[38]; {
+    for sector in map.sectors.iter_mut() {
+        collider_set.insert(sector.floor_collider.take().unwrap());
+        collider_set.insert(sector.wall_collider.take().unwrap());
+    }
+
+    let player_rigidbody = RigidBodyBuilder::new_dynamic()
+        .translation(vector![1077.0 / UNIT_TO_METERS, 20.0 / UNIT_TO_METERS, -3600.0 / UNIT_TO_METERS])
+        .build();
+    let player_rigidbody = rigid_body_set.insert(player_rigidbody);
+
+    let player_collider = ColliderBuilder::cuboid(1.0, 4.0, 1.0)
+        .build();
+    let player_collider =
+        collider_set.insert_with_parent(player_collider,
+                                        player_rigidbody,
+                                        &mut rigid_body_set);
 
     let mut world = World::default();
 
     world.insert_resource(GameState::new());
     world.insert_resource(DeltaTime(0.0));
+    world.insert_resource(map);
+    world.insert_resource(rigid_body_set);
 
-    let camera_id = world.spawn()
+    let player_id = world.spawn()
         .insert(Position(Vec3::new(1077.0, 460.0, -3600.0)))
-        .insert(CameraController {
-            front: Vec3::new(0.0, 0.0, 1.0),
+        .insert(Camera {
+            direction: Vec3::new(0.0, 0.0, 1.0),
             up: Vec3::new(0.0, 1.0, 0.0),
         })
-        .id();
-
-    let id = world.spawn()
-        .insert(Position(Vec3::new(0.0, 0.0, 0.0)))
+        .insert(Player {
+            speed: 100.0,
+            collider_handle: player_collider,
+            body_handle: player_rigidbody,
+        })
         .id();
 
     let mut schedule = Schedule::default();
 
     let stage = SystemStage::single_threaded()
-        .with_system(test)
+        .with_system(update_player_physics)
         .with_system(update_camera);
     schedule.add_stage("update", stage);
+
+    let gravity = vector![0.0, -9.81, 0.0];
+    let integration_parameters = IntegrationParameters::default();
+    let mut physics_pipeline = PhysicsPipeline::new();
+    let mut island_manager = IslandManager::new();
+    let mut broad_phase = BroadPhase::new();
+    let mut narrow_phase = NarrowPhase::new();
+    let mut joint_set = JointSet::new();
+    let mut ccd_solver = CCDSolver::new();
+    let physics_hooks = ();
+    let event_handler = ();
 
     let time = Instant::now();
     let mut past = 0.0;
@@ -293,10 +419,30 @@ fn main() {
             }
         }
 
+        let mut rigid_body_set = world.get_resource_mut::<RigidBodySet>()
+            .unwrap();
+
+        physics_pipeline.step(
+            &gravity,
+            &integration_parameters,
+            &mut island_manager,
+            &mut broad_phase,
+            &mut narrow_phase,
+            &mut rigid_body_set,
+            &mut collider_set,
+            &mut joint_set,
+            &mut ccd_solver,
+            &physics_hooks,
+            &event_handler,
+        );
+
         schedule.run(&mut world);
 
-        let camera = world.entity(camera_id);
-        let view_matrix = generate_view_matrix(camera);
+        let player = world.entity(player_id);
+        let view_matrix = generate_view_matrix(player);
+
+        let player = world.entity(player_id);
+        let player_pos = player.get::<Position>().unwrap().0;
 
         // TODO(patrik): Check error
         let output = surface.get_render_target().unwrap();
@@ -346,14 +492,27 @@ fn main() {
                     }),
                 });
 
-            render_pass.set_pipeline(&pipeline.handle());
             render_pass.set_bind_group(0, &uniform_buffer_bind_group, &[]);
 
-            for mesh in &map.meshes {
-                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            let map = world.get_resource::<Map>().unwrap();
+            // let sector = &map.sectors[38]; {
+            for sector in &map.sectors {
 
-                render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                render_pass.set_pipeline(&pipeline.handle());
+
+                let m = &sector.floor_mesh;
+                render_pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(m.index_buffer.slice(..),
+                                             wgpu::IndexFormat::Uint32);
+
+                render_pass.draw_indexed(0..m.index_count, 0, 0..1);
+
+                let m = &sector.wall_mesh;
+                render_pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(m.index_buffer.slice(..),
+                                             wgpu::IndexFormat::Uint32);
+
+                render_pass.draw_indexed(0..m.index_count, 0, 0..1);
             }
         }
 
@@ -381,6 +540,7 @@ fn handle_window_event(game_state: &mut GameState,
                 Key::S => game_state.down = true,
                 Key::A => game_state.left = true,
                 Key::D => game_state.right = true,
+                Key::Space => game_state.jump = true,
 
                 _ => {},
             }
@@ -392,6 +552,7 @@ fn handle_window_event(game_state: &mut GameState,
                 Key::S => game_state.down = false,
                 Key::A => game_state.left = false,
                 Key::D => game_state.right = false,
+                Key::Space => game_state.jump = false,
 
                 _ => {},
             }

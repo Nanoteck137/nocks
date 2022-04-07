@@ -145,7 +145,7 @@ impl Texture {
             dimension: wgpu::TextureDimension::D2,
             format: Self::DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT |
-                    wgpu::TextureUsages::TEXTURE_BINDING,
+                   wgpu::TextureUsages::TEXTURE_BINDING,
         };
 
         let texture = gpu_device.device.create_texture(&desc);
