@@ -103,7 +103,7 @@ fn load_map<P>(filename: P, gpu_device: &GpuDevice) -> Option<Map>
             Mesh::from_data(gpu_device, &vertex_buffer, index_buffer)
         };
 
-        let generate_collider = |m: &mime::Mesh| {
+        let generate_collider = |m: &mime::Mesh, t: bool| {
             let mut points = Vec::new();
             let mut indices = Vec::new();
 
@@ -121,11 +121,17 @@ fn load_map<P>(filename: P, gpu_device: &GpuDevice) -> Option<Map>
                 indices.push([p1, p2, p3]);
             }
 
-            ColliderBuilder::trimesh(points, indices).build()
+            if t {
+                ColliderBuilder::trimesh(points, indices)
+                    .active_hooks(ActiveHooks::MODIFY_SOLVER_CONTACTS)
+                    .build()
+            } else {
+                ColliderBuilder::trimesh(points, indices).build()
+            }
         };
 
-        let floor_collider = generate_collider(&sector.floor_mesh);
-        let wall_collider = generate_collider(&sector.wall_mesh);
+        let floor_collider = generate_collider(&sector.floor_mesh, false);
+        let wall_collider = generate_collider(&sector.wall_mesh, true);
 
         let floor_mesh = generate_mesh(&sector.floor_mesh);
         let ceiling_mesh = generate_mesh(&sector.ceiling_mesh);
@@ -188,18 +194,30 @@ fn update_camera(mut query: Query<(&mut Position, &mut Camera, &Player)>,
 
         camera.direction = direction.normalize();
 
+        const SPEED: f32 = 10.0;
+
         if game_state.up {
-            let dir = camera.direction;
-            let force = dir * 20.0;
-            let force = vector![force.x, 0.0, force.z];
+            let dir = camera.direction * SPEED;
+
+            let linvel = body.linvel();
+            let force = vector![dir.x, linvel.y, dir.z];
+
+            body.set_linvel(force, true);
+        } else if game_state.down {
+            let dir = -camera.direction * SPEED;
+
+            let linvel = body.linvel();
+            let force = vector![dir.x, linvel.y, dir.z];
 
             body.set_linvel(force, true);
         }
 
         if game_state.jump {
             let dir = Vec3::new(0.0, 1.0, 0.0);
-            let force = dir * 20.0;
-            let force = vector![force.x, force.y, force.z];
+            let force = dir * 2.0;
+
+            let linvel = body.linvel();
+            let force = vector![linvel.x, 2.0, linvel.z];
 
             body.set_linvel(force, true);
         }
@@ -248,6 +266,57 @@ fn generate_view_matrix(camera: EntityRef) -> Mat4 {
     let pos = pos.0 + Vec3::new(0.0, 20.0, 0.0);
 
     Mat4::look_at_lh(pos, pos+ controller.direction, controller.up)
+}
+
+struct Test;
+
+impl EventHandler for Test {
+    fn handle_intersection_event(&self, event: IntersectionEvent) {
+        println!("handle_intersection_event");
+    }
+
+    fn handle_contact_event(&self,
+                            event: ContactEvent,
+                            contact_pair: &ContactPair)
+    {
+        println!("handle_contact_event");
+    }
+}
+
+impl PhysicsHooks<RigidBodySet, ColliderSet> for Test {
+    fn modify_solver_contacts(&self, context: &mut ContactModificationContext<RigidBodySet, ColliderSet>) {
+        //println!("modify_solver_contacts {:?}", context.rigid_body2);
+        if let Some(rigid_body) = context.rigid_body2 {
+            let collider = context.colliders.get(context.collider1)
+                .unwrap();
+            let rigid_body = context.bodies.get(rigid_body)
+                .unwrap();
+
+
+            let normal = Vec3::new(context.normal.x,
+                                   context.normal.y,
+                                   context.normal.z);
+
+            let dir = -normal.normalize();
+
+            let test = normal.dot(Vec3::new(0.0, 1.0, 0.0));
+            if test > 0.0 || test < 0.0 {
+                let aabb = collider.shape().compute_local_aabb();
+                let height = aabb.extents().y;
+                *context.normal = vector![0.0, 1.0, 0.0];
+
+                /*
+                for mut solve in context.solver_contacts.iter_mut() {
+                    let mut vel = dir * 10.0;
+                    vel.y = vel.y + height * 100.0;
+
+                    solve.tangent_velocity = vector![0.0, 100.0, 0.0];
+                }
+                */
+            }
+        }
+    }
+
 }
 
 fn main() {
@@ -340,9 +409,10 @@ fn main() {
         collider_set.insert(sector.wall_collider.take().unwrap());
     }
 
-    let player_rigidbody = RigidBodyBuilder::new_dynamic()
+    let mut player_rigidbody = RigidBodyBuilder::new_dynamic()
         .translation(vector![1077.0 / UNIT_TO_METERS, 20.0 / UNIT_TO_METERS, -3600.0 / UNIT_TO_METERS])
         .build();
+    player_rigidbody.lock_rotations(true, true);
     let player_rigidbody = rigid_body_set.insert(player_rigidbody);
 
     let player_collider = ColliderBuilder::cuboid(1.0, 4.0, 1.0)
@@ -387,8 +457,8 @@ fn main() {
     let mut narrow_phase = NarrowPhase::new();
     let mut joint_set = JointSet::new();
     let mut ccd_solver = CCDSolver::new();
-    let physics_hooks = ();
-    let event_handler = ();
+    let physics_hooks = Test {};
+    let event_handler = Test {};
 
     let time = Instant::now();
     let mut past = 0.0;
